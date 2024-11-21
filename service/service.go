@@ -281,10 +281,10 @@ func (s *OrderCartService) PlaceOrderByRestID(ctx context.Context, req *orderCar
 	}
 
 	// Get restaurant details
-	restaurantReq := &restaurantPb.GetRestaurantProductsByIDRequest{
+	restaurantReq := &restaurantPb.GetRestaurantByIDRequest{
 		RestaurantId: req.RestaurantId,
 	}
-	restaurantResp, err := restaurantClient.GetRestaurantProductsByID(ctx, restaurantReq)
+	restaurantResp, err := restaurantClient.GetRestaurantByID(ctx, restaurantReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get restaurant details: %w", err)
 	}
@@ -364,16 +364,13 @@ func (s *OrderCartService) PlaceOrderByRestID(ctx context.Context, req *orderCar
 		OrderID:         uuid.New().String(),
 		UserID:          req.UserId,
 		RestaurantID:    req.RestaurantId,
-		RestaurantName:  restaurantResp.Name,
-		RestaurantPhone: restaurantResp.Phone,
+		RestaurantName:  restaurantResp.RestaurantName,
+		RestaurantPhone: restaurantResp.PhoneNumber,
 		TotalAmount:     totalAmount,
 		OrderStatus:     "PENDING",
 		CreatedAt:       time.Now(),
 		OrderItems:      orderItems,
-		StreetName:      req.DeliveryAddress.StreetName,
-		Locality:        req.DeliveryAddress.Locality,
-		State:           req.DeliveryAddress.State,
-		Pincode:         req.DeliveryAddress.Pincode,
+		DeliveryAddressID: req.DeliveryAddressId,
 	}
 
 	// Save order
@@ -532,6 +529,25 @@ func (s *OrderCartService) CancelOrder(ctx context.Context, req *orderCartPb.Can
 	}, nil
 }
 
+// OrderCart Service - Simple Order Confirmation
+func (s *OrderCartService) ConfirmOrder(ctx context.Context, req *orderCartPb.ConfirmOrderRequest) (*orderCartPb.ConfirmOrderResponse, error) {
+	// Just update the order status to CONFIRMED
+	_, err := s.UpdateOrderStatus(ctx, &orderCartPb.UpdateOrderStatusRequest{
+		OrderId:      req.OrderId,
+		RestaurantId: req.RestaurantId,
+		NewStatus:    "CONFIRMED",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &orderCartPb.ConfirmOrderResponse{
+		Success:     true,
+		Message:     "Order confirmed successfully",
+		OrderStatus: "CONFIRMED",
+	}, nil
+}
+
 // GetRestaurantOrders retrieves all orders for a specified restaurant ID.
 //
 // The method returns an error if the operation fails.
@@ -571,6 +587,8 @@ func (s *OrderCartService) GetRestaurantOrders(ctx context.Context, req *orderCa
 			},
 		})
 	}
+
+    fmt.Println(pbOrders,"pbOrders")
 
 	return &orderCartPb.GetRestaurantOrdersResponse{
 		Orders:  pbOrders,
