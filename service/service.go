@@ -10,6 +10,7 @@ import (
 
 	orderCartPb "github.com/liju-github/CentralisedFoodbuddyMicroserviceProto/OrderCart"
 	restaurantPb "github.com/liju-github/CentralisedFoodbuddyMicroserviceProto/Restaurant"
+	userPb "github.com/liju-github/CentralisedFoodbuddyMicroserviceProto/User"
 	clients "github.com/liju-github/FoodBuddyMicroserviceOrderCart/clients"
 	"github.com/liju-github/FoodBuddyMicroserviceOrderCart/models"
 	"github.com/liju-github/FoodBuddyMicroserviceOrderCart/repository"
@@ -189,7 +190,7 @@ func (s *OrderCartService) IncrementProductQuantity(ctx context.Context, req *or
 
 	for _, item := range items {
 		if item.ProductID == req.ProductId {
-			err := s.repo.UpdateCartItemQuantity(req.UserId, req.ProductId, req.RestaurantId, item.Quantity+1)
+			err := s.repo.UpdateCartItemQuantity(req.UserId, req.RestaurantId, req.ProductId, item.Quantity+1)
 			if err != nil {
 				return nil, fmt.Errorf("failed to increment quantity: %w", err)
 			}
@@ -211,21 +212,29 @@ func (s *OrderCartService) DecrementProductQuantity(ctx context.Context, req *or
 		return nil, fmt.Errorf("failed to get cart items: %w", err)
 	}
 
+	itemFound := false
 	for _, item := range items {
 		if item.ProductID == req.ProductId {
+			itemFound = true
 			if item.Quantity > 1 {
-				err := s.repo.UpdateCartItemQuantity(req.UserId, req.ProductId, req.RestaurantId, item.Quantity-1)
+				err := s.repo.UpdateCartItemQuantity(req.UserId, req.RestaurantId, req.ProductId, item.Quantity-1)
 				if err != nil {
 					return nil, fmt.Errorf("failed to decrement quantity: %w", err)
 				}
 			} else {
-				err := s.repo.RemoveFromCart(req.UserId, req.ProductId, req.RestaurantId)
+				err := s.repo.RemoveFromCart(req.UserId, req.RestaurantId, req.ProductId)
 				if err != nil {
 					return nil, fmt.Errorf("failed to remove item: %w", err)
 				}
 			}
 			break
 		}
+	}
+
+	if !itemFound {
+		return &orderCartPb.DecrementProductQuantityResponse{
+			Message: "Product not found in cart",
+		}, nil
 	}
 
 	return &orderCartPb.DecrementProductQuantityResponse{
@@ -237,7 +246,7 @@ func (s *OrderCartService) DecrementProductQuantity(ctx context.Context, req *or
 //
 // The method returns an error if the operation fails.
 func (s *OrderCartService) RemoveProductFromCart(ctx context.Context, req *orderCartPb.RemoveProductFromCartRequest) (*orderCartPb.RemoveProductFromCartResponse, error) {
-	err := s.repo.RemoveFromCart(req.UserId, req.ProductId, req.RestaurantId)
+	err := s.repo.RemoveFromCart(req.UserId, req.RestaurantId, req.ProductId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to remove product from cart: %w", err)
 	}
@@ -361,17 +370,42 @@ func (s *OrderCartService) PlaceOrderByRestID(ctx context.Context, req *orderCar
 
 	// Create order
 	order := &models.Order{
-		OrderID:         uuid.New().String(),
-		UserID:          req.UserId,
-		RestaurantID:    req.RestaurantId,
-		RestaurantName:  restaurantResp.RestaurantName,
-		RestaurantPhone: restaurantResp.PhoneNumber,
-		TotalAmount:     totalAmount,
-		OrderStatus:     "PENDING",
-		CreatedAt:       time.Now(),
-		OrderItems:      orderItems,
+		OrderID:           fmt.Sprintf("order_%s", uuid.New().String()),
+		UserID:            req.UserId,
+		RestaurantID:      req.RestaurantId,
+		RestaurantName:    restaurantResp.RestaurantName,
+		RestaurantPhone:   restaurantResp.PhoneNumber,
+		TotalAmount:       totalAmount,
+		OrderStatus:       "PENDING",
+		CreatedAt:         time.Now(),
+		OrderItems:        orderItems,
 		DeliveryAddressID: req.DeliveryAddressId,
 	}
+
+	// Get delivery address details and validate
+	userClient, err := clients.NewUserClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user client: %w", err)
+	}
+
+	validateAddressReq := &userPb.ValidateUserAddressRequest{
+		UserId:    req.UserId,
+		AddressId: req.DeliveryAddressId,
+	}
+	validateAddressResp, err := userClient.ValidateUserAddress(ctx, validateAddressReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to validate delivery address: %w", err)
+	}
+
+	if !validateAddressResp.IsValid {
+		return nil, fmt.Errorf("invalid delivery address: %s", validateAddressResp.Message)
+	}
+
+	// Update order with address details
+	order.StreetName = validateAddressResp.Address.StreetName
+	order.Locality = validateAddressResp.Address.Locality
+	order.State = validateAddressResp.Address.State
+	order.Pincode = validateAddressResp.Address.Pincode
 
 	// Save order
 	err = s.repo.CreateOrder(order)
@@ -392,6 +426,36 @@ func (s *OrderCartService) PlaceOrderByRestID(ctx context.Context, req *orderCar
 		return nil, fmt.Errorf("failed to create order: %w", err)
 	}
 
+	// Convert order items to protobuf format
+	var orderItemsPb []*orderCartPb.OrderItem
+	for _, item := range order.OrderItems {
+		orderItemsPb = append(orderItemsPb, &orderCartPb.OrderItem{
+			ProductId:   item.ProductID,
+			ProductName: item.ProductName,
+			Description: item.Description,
+			Category:    item.Category,
+			Price:       item.Price,
+			Quantity:    item.Quantity,
+		})
+	}
+
+	// Convert order to protobuf format
+	orderPb := &orderCartPb.Order{
+		OrderId:      order.OrderID,
+		UserId:       order.UserID,
+		RestaurantId: order.RestaurantID,
+		Items:        orderItemsPb,
+		TotalAmount:  order.TotalAmount,
+		OrderStatus:  order.OrderStatus,
+		CreatedAt:    order.CreatedAt.Format(time.RFC3339),
+		DeliveryAddress: &orderCartPb.Address{
+			StreetName: order.StreetName,
+			Locality:   order.Locality,
+			State:      order.State,
+			Pincode:    order.Pincode,
+		},
+	}
+
 	// Clear cart
 	err = s.repo.ClearCart(req.UserId, req.RestaurantId)
 	if err != nil {
@@ -400,6 +464,8 @@ func (s *OrderCartService) PlaceOrderByRestID(ctx context.Context, req *orderCar
 	}
 
 	return &orderCartPb.PlaceOrderByRestIDResponse{
+		Success: true,
+		Order:   orderPb,
 		OrderId: order.OrderID,
 		Message: "Order placed successfully",
 	}, nil
@@ -529,16 +595,55 @@ func (s *OrderCartService) CancelOrder(ctx context.Context, req *orderCartPb.Can
 	}, nil
 }
 
+// UpdateOrderStatus updates the status of an order.
+//
+// The method validates that the order exists and belongs to the specified restaurant
+// before updating its status. Returns an error if the operation fails.
+func (s *OrderCartService) UpdateOrderStatus(ctx context.Context, req *orderCartPb.UpdateOrderStatusRequest) (*orderCartPb.UpdateOrderStatusResponse, error) {
+	// Get the order to validate ownership
+	order, err := s.repo.GetOrderByID(req.OrderId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get order: %w", err)
+	}
+
+	// Validate restaurant ownership
+	if order.RestaurantID != req.RestaurantId {
+		return &orderCartPb.UpdateOrderStatusResponse{
+			Success: false,
+			Message: "Unauthorized: Order does not belong to this restaurant",
+		}, nil
+	}
+
+	// Update order status
+	err = s.repo.UpdateOrderStatus(req.OrderId, req.NewStatus)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update order status: %w", err)
+	}
+
+	return &orderCartPb.UpdateOrderStatusResponse{
+		Success: true,
+		Message: fmt.Sprintf("Order status updated to %s successfully", req.NewStatus),
+	}, nil
+}
+
 // OrderCart Service - Simple Order Confirmation
 func (s *OrderCartService) ConfirmOrder(ctx context.Context, req *orderCartPb.ConfirmOrderRequest) (*orderCartPb.ConfirmOrderResponse, error) {
-	// Just update the order status to CONFIRMED
-	_, err := s.UpdateOrderStatus(ctx, &orderCartPb.UpdateOrderStatusRequest{
+	// Update the order status to CONFIRMED
+	updateResp, err := s.UpdateOrderStatus(ctx, &orderCartPb.UpdateOrderStatusRequest{
 		OrderId:      req.OrderId,
 		RestaurantId: req.RestaurantId,
 		NewStatus:    "CONFIRMED",
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to confirm order: %w", err)
+	}
+
+	if !updateResp.Success {
+		return &orderCartPb.ConfirmOrderResponse{
+			Success:     false,
+			Message:     updateResp.Message,
+			OrderStatus: "PENDING",
+		}, nil
 	}
 
 	return &orderCartPb.ConfirmOrderResponse{
@@ -588,7 +693,7 @@ func (s *OrderCartService) GetRestaurantOrders(ctx context.Context, req *orderCa
 		})
 	}
 
-    fmt.Println(pbOrders,"pbOrders")
+	fmt.Println(pbOrders, "pbOrders")
 
 	return &orderCartPb.GetRestaurantOrdersResponse{
 		Orders:  pbOrders,

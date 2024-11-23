@@ -14,6 +14,8 @@ type Config struct {
 	DBHost       string
 	DBPort       string
 	ORDERCARTGRPCPORT string
+	RESTAURANTGRPCPORT string
+	USERGRPCPORT string
 	JWTSecretKey string
 }
 
@@ -29,6 +31,8 @@ func LoadConfig() Config {
 		DBHost:       os.Getenv("DBHOST"),
 		DBPort:       os.Getenv("DBPORT"),
 		ORDERCARTGRPCPORT: os.Getenv("ORDERCARTGRPCPORT"),
+		RESTAURANTGRPCPORT: os.Getenv("RESTAURANTGRPCPORT"),
+		USERGRPCPORT: os.Getenv("USERGRPCPORT"),
 		JWTSecretKey: os.Getenv("JWTSECRET"),
 	}
 }
